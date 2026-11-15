@@ -8,9 +8,13 @@ null scores are returned instead.
 """
 
 import logging
+import os
 
 from datasets import Dataset
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas import evaluate
+from ragas.embeddings import LangchainEmbeddingsWrapper
+from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import answer_relevancy, context_precision, faithfulness
 
 logger = logging.getLogger(__name__)
@@ -31,9 +35,20 @@ def run_ragas_eval(
             }
         )
 
+        llm = LangchainLLMWrapper(ChatOpenAI(
+            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+        ))
+        embeddings = LangchainEmbeddingsWrapper(OpenAIEmbeddings(
+            model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+        ))
+
         result = evaluate(
             dataset,
             metrics=[faithfulness, answer_relevancy, context_precision],
+            llm=llm,
+            embeddings=embeddings,
         )
 
         scores = {
