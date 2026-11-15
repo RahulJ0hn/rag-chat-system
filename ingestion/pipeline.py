@@ -19,6 +19,8 @@ from qdrant_client.models import (
     Distance,
     PointIdsList,
     PointStruct,
+    SparseIndexParams,
+    SparseVectorParams,
     VectorParams,
 )
 
@@ -28,6 +30,7 @@ from ingestion.extractor import extract_elements
 from ingestion.validator import validate_file
 from observability.langfuse_client import log_metadata, observe
 from query.embedder import get_embeddings_batch
+from query.sparse_encoder import compute_sparse_vector
 from storage import document_registry, object_store
 
 # Module-level client — never instantiate per call.
@@ -35,16 +38,28 @@ qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
 
 
 def ensure_collection() -> None:
-    """Create the Qdrant collection on startup if it does not already exist."""
+    """
+    Create the Qdrant collection on startup if it does not already exist.
+
+    Feature: Hybrid Search (Dense + Sparse BM25) — vectors are stored
+    under the named "dense" config (OpenAI embeddings) alongside a
+    named "sparse" config (BM25 term vectors) so retriever.py can
+    fuse both with Reciprocal Rank Fusion.
+    """
     collection_name = os.getenv("QDRANT_COLLECTION")
     existing = {c.name for c in qdrant_client.get_collections().collections}
     if collection_name not in existing:
         qdrant_client.recreate_collection(
             collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=int(os.getenv("EMBEDDING_DIM")),
-                distance=Distance.COSINE,
-            ),
+            vectors_config={
+                "dense": VectorParams(
+                    size=int(os.getenv("EMBEDDING_DIM")),
+                    distance=Distance.COSINE,
+                )
+            },
+            sparse_vectors_config={
+                "sparse": SparseVectorParams(index=SparseIndexParams(on_disk=False))
+            },
         )
 
 
@@ -148,7 +163,16 @@ def ingest_document(file_bytes: bytes, filename: str) -> dict[str, Any]:
             "access_tags": ["public"],
             "token_count": chunk["token_count"],
         }
-        points.append(PointStruct(id=point_id, vector=embedding, payload=payload))
+        points.append(
+            PointStruct(
+                id=point_id,
+                vector={
+                    "dense": embedding,
+                    "sparse": compute_sparse_vector(chunk["text"]),
+                },
+                payload=payload,
+            )
+        )
 
     upsert_start = time.monotonic()
     try:

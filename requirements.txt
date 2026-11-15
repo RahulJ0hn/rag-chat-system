@@ -13,3 +13,5 @@ langfuse
 ragas
 datasets
 structlog
+cohere
+sse-starlette

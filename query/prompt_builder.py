@@ -19,23 +19,47 @@ Cite sources at the end:
 """
 
 
-def build_user_message(results: list[Any], user_query: str) -> str:
-    """Assemble the user message from retrieved chunks and the question."""
+def build_context_block(retrieved_chunks: list[Any]) -> str:
+    """Assemble the context block from retrieved chunks, with source citations."""
     context_blocks = []
-    for result in results:
+    for result in retrieved_chunks:
         payload = result.payload
         block = (
-            f"Context:\n---\n"
             f"{format_context_chunk(payload)}\n"
-            f"[Source: {payload['doc_name']}, Page {payload['page_number']}]\n"
-            f"---"
+            f"[Source: {payload['doc_name']}, Page {payload['page_number']}]"
         )
         context_blocks.append(block)
 
-    context_section = "\n".join(context_blocks)
-    return f"{context_section}\nQuestion: {user_query}"
+    return "\n\n".join(context_blocks)
 
 
-def build_prompt(results: list[Any], user_query: str) -> tuple[str, str]:
-    """Return the (system_prompt, user_message) pair for the LLM call."""
-    return SYSTEM_PROMPT, build_user_message(results, user_query)
+def build_prompt(
+    query: str,
+    retrieved_chunks: list[Any],
+    conversation_history: list[dict] | None = None,
+) -> tuple[str, list[dict]]:
+    """
+    Returns (system_prompt, messages_list).
+
+    Feature: Conversation Memory (Multi-turn Chat) — messages_list
+    includes prior conversation turns so the LLM has multi-turn
+    context when a session_id is provided.
+    """
+    history = conversation_history or []
+    context_block = build_context_block(retrieved_chunks)
+
+    # Build messages array with history
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # Append prior turns (gives LLM conversation context)
+    messages.extend(history)
+
+    # Append current user message with context
+    messages.append(
+        {
+            "role": "user",
+            "content": f"Context:\n---\n{context_block}\n---\n\nQuestion: {query}",
+        }
+    )
+
+    return SYSTEM_PROMPT, messages
