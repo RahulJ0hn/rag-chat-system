@@ -6,17 +6,23 @@ import json
 import os
 from typing import AsyncGenerator
 
-import openai
+# langfuse.openai.AsyncOpenAI is a drop-in subclass of openai.AsyncOpenAI
+# that auto-records every call as a Langfuse generation (model, tokens,
+# latency, $ cost) — plain openai.AsyncOpenAI would be invisible to it.
+from langfuse.openai import AsyncOpenAI
 
-client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 async def stream_llm_response(
     system_prompt: str, user_message: str
 ) -> AsyncGenerator[str, None]:
     """
-    Yields SSE-formatted token chunks as they arrive from OpenAI.
-    Yields a final [DONE] event with sources and metadata.
+    Yields raw SSE payload strings (no "data: " prefix, no trailing
+    newlines) as tokens arrive from OpenAI. EventSourceResponse applies
+    the actual "data: ...\\n\\n" wire framing itself — pre-formatting it
+    here would double-wrap the payload and break the client's parser.
+    Yields a final [DONE] sentinel once the stream ends.
     """
     stream = await client.chat.completions.create(
         model=os.getenv("LLM_MODEL"),
@@ -31,9 +37,9 @@ async def stream_llm_response(
     async for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
-            yield f"data: {json.dumps({'token': delta})}\n\n"
+            yield json.dumps({"token": delta})
 
-    yield "data: [DONE]\n\n"
+    yield "[DONE]"
 
 
 # Feature: Streaming Response implemented

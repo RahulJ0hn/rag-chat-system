@@ -7,7 +7,7 @@ import os
 
 from fastapi import HTTPException
 
-ALLOWED_EXTENSIONS: set[str] = {".pdf", ".docx", ".txt"}
+ALLOWED_EXTENSIONS: set[str] = {".pdf", ".docx", ".txt", ".md"}
 MAX_FILE_SIZE_BYTES: int = 20 * 1024 * 1024  # 20MB
 
 

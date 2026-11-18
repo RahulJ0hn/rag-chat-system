@@ -14,15 +14,24 @@ import os
 from typing import Any
 
 import redis
-
-logger = logging.getLogger(__name__)
 from redisvl.index import SearchIndex
 from redisvl.query import VectorQuery
+from redisvl.redis.utils import array_to_buffer
 from redisvl.schema import IndexSchema
+
+logger = logging.getLogger(__name__)
 
 redis_client = redis.Redis.from_url(
     os.getenv("REDIS_URL", "redis://localhost:6379"),
     decode_responses=True,
+)
+
+# The semantic index stores a raw binary vector field (HASH storage), so
+# it needs its own connection WITHOUT decode_responses — decoding would
+# try to UTF-8-decode the packed float bytes and corrupt them.
+redis_client_bytes = redis.Redis.from_url(
+    os.getenv("REDIS_URL", "redis://localhost:6379"),
+    decode_responses=False,
 )
 
 EXACT_KEY_PREFIX = "query:"
@@ -49,7 +58,7 @@ _semantic_schema = IndexSchema.from_dict(
 )
 
 # Module-level index — never instantiate per call.
-semantic_index = SearchIndex(_semantic_schema, redis_client=redis_client)
+semantic_index = SearchIndex(_semantic_schema, redis_client=redis_client_bytes)
 semantic_index.create(overwrite=False)
 
 
@@ -129,7 +138,10 @@ def set_semantic(
                 {
                     "query_text": normalized_query,
                     "response": json.dumps(response),
-                    "query_vector": query_embedding,
+                    # HASH storage needs the vector pre-packed into bytes —
+                    # unlike VectorQuery on the read side, .load() does not
+                    # convert a plain list for you.
+                    "query_vector": array_to_buffer(query_embedding, "float32"),
                 }
             ]
         )

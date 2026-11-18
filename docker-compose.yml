@@ -8,7 +8,7 @@ services:
       - qdrant_data:/qdrant/storage
 
   redis:
-    image: redis:7-alpine
+    image: redis/redis-stack-server:7.2.0-v11
     ports:
       - "6379:6379"
     volumes:

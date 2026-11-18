@@ -7,10 +7,14 @@ so document and query vectors stay comparable in Qdrant.
 
 import os
 
-import openai
+# langfuse.openai.OpenAI is a drop-in subclass of openai.OpenAI that
+# auto-records every call as a Langfuse generation (model, tokens,
+# latency, $ cost) — using plain openai.OpenAI here would make all of
+# that invisible to Langfuse.
+from langfuse.openai import OpenAI
 
 # Module-level client — never instantiate per call.
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 BATCH_SIZE = 100  # rate limit safety
 

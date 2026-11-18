@@ -14,6 +14,13 @@ MAX_CHUNK_TOKENS = 500
 OVERLAP_TOKENS = 50
 MIN_CHUNK_TOKENS = 50
 NARRATIVE_SEPARATORS = ["\n\n", "\n", ". ", "? ", "! ", " ", ""]
+BLOCK_SEPARATORS = ["\n\n", "\n", " ", ""]
+
+# text-embedding-3-small hard-rejects any single input over 8192 tokens.
+# "Never split" tables/code is a preference, not a guarantee — a big
+# enough table or code block must still be split, or ingestion fails
+# outright with an OpenAI 400 on the whole batch.
+MAX_UNSPLIT_BLOCK_TOKENS = 7500
 
 _encoder = tiktoken.get_encoding("cl100k_base")
 
@@ -37,12 +44,28 @@ def chunk_elements(
             continue
         token_count = count_tokens(text)
 
-        # --- TABLE / CODE: never split, store whole ---
+        # --- TABLE / CODE: kept whole, unless that would exceed the
+        # embedding model's hard input limit — then split as a last resort.
         if element_type in ("table", "code"):
-            chunks.append(
-                build_chunk(text, element_type, chunk_index, element, doc_name, doc_hash)
-            )
-            chunk_index += 1
+            if token_count <= MAX_UNSPLIT_BLOCK_TOKENS:
+                chunks.append(
+                    build_chunk(text, element_type, chunk_index, element, doc_name, doc_hash)
+                )
+                chunk_index += 1
+            else:
+                sub_chunks = recursive_split(
+                    text=text,
+                    separators=BLOCK_SEPARATORS,
+                    max_tokens=MAX_UNSPLIT_BLOCK_TOKENS,
+                    overlap_tokens=0,
+                )
+                for sub in sub_chunks:
+                    if not sub.strip():
+                        continue
+                    chunks.append(
+                        build_chunk(sub, element_type, chunk_index, element, doc_name, doc_hash)
+                    )
+                    chunk_index += 1
 
         # --- LIST: keep together if it fits, else split at item boundaries ---
         elif element_type == "list":
@@ -94,6 +117,24 @@ def _split_list_by_items(text: str) -> list[str]:
 
     for item in items:
         item_tokens = count_tokens(item)
+
+        # A single item larger than the embedding model's hard limit
+        # (a huge pasted code block as one "bullet", say) still has to
+        # be split further — it can't be packed as one atomic piece.
+        if item_tokens > MAX_UNSPLIT_BLOCK_TOKENS:
+            if buffer:
+                groups.append("\n".join(buffer))
+                buffer, buffer_tokens = [], 0
+            groups.extend(
+                recursive_split(
+                    text=item,
+                    separators=BLOCK_SEPARATORS,
+                    max_tokens=MAX_UNSPLIT_BLOCK_TOKENS,
+                    overlap_tokens=0,
+                )
+            )
+            continue
+
         if buffer_tokens + item_tokens > MAX_CHUNK_TOKENS:
             if buffer:
                 groups.append("\n".join(buffer))

@@ -11,10 +11,15 @@ from typing import Any
 import openai
 from fastapi import HTTPException
 
+# langfuse.openai.OpenAI is a drop-in subclass of openai.OpenAI (same
+# exception types) that auto-records every call as a Langfuse
+# generation — model, tokens, latency, $ cost all show up automatically.
+from langfuse.openai import OpenAI
+
 from cache import manager as cache_manager
 from evals.score_logger import evaluate_and_log
 from observability.cost_tracker import calculate_chat_cost
-from observability.langfuse_client import langfuse_context, log_error_trace, observe
+from observability.langfuse_client import langfuse_client, log_error_trace, observe
 from query.embedder import get_embedding
 from query.intent_detector import detect_intent
 from query.memory import append_turn, get_history
@@ -24,7 +29,7 @@ from query.retriever import search
 from storage.object_store import get_presigned_url
 
 # Module-level client — never instantiate per call.
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 NULL_EVAL_SCORES = {"faithfulness": None, "answer_relevancy": None, "context_precision": None}
 
@@ -103,7 +108,7 @@ def answer_query(query: str, user_role: str, session_id: str | None = None) -> d
     # Feature: Intent Detection — classify before doing any retrieval work
     # so greetings/out-of-scope queries skip embedding, cache, and search.
     intent = detect_intent(normalized_query)
-    langfuse_context.update_current_observation(metadata={"intent": intent})
+    langfuse_client.update_current_span(metadata={"intent": intent})
 
     if intent == "greeting":
         return {
@@ -198,7 +203,7 @@ def answer_query(query: str, user_role: str, session_id: str | None = None) -> d
     if session_id:
         append_turn(session_id, query, answer)
 
-    langfuse_context.update_current_observation(
+    langfuse_client.update_current_span(
         metadata={
             "query": query,
             "normalized_query": normalized_query,
@@ -215,7 +220,7 @@ def answer_query(query: str, user_role: str, session_id: str | None = None) -> d
     )
 
     eval_scores = evaluate_and_log(
-        trace_id=langfuse_context.get_current_trace_id(),
+        trace_id=langfuse_client.get_current_trace_id(),
         query=query,
         answer=answer,
         retrieved_chunks=[r.payload["text"] for r in results],

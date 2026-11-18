@@ -7,9 +7,11 @@ import json
 import os
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from qdrant_client.models import PointIdsList
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sse_starlette.sse import EventSourceResponse
 
 from cache import manager as cache_manager
@@ -25,6 +27,7 @@ from query.stream import stream_llm_response
 from storage import document_registry, object_store
 
 router = APIRouter()
+limiter = Limiter(key_func=get_remote_address)
 
 
 class QueryRequest(BaseModel):
@@ -34,7 +37,8 @@ class QueryRequest(BaseModel):
 
 
 @router.post("/ingest")
-async def ingest(file: UploadFile = File(...)) -> dict[str, Any]:
+@limiter.limit("5/minute")
+async def ingest(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     """Ingest an uploaded document into the RAG pipeline."""
     file_bytes = await file.read()
     try:
@@ -47,19 +51,21 @@ async def ingest(file: UploadFile = File(...)) -> dict[str, Any]:
 
 
 @router.post("/query")
-async def query(request: QueryRequest) -> dict[str, Any]:
+@limiter.limit("20/minute")
+async def query(request: Request, body: QueryRequest) -> dict[str, Any]:
     """Answer a user query using retrieval-augmented generation."""
     try:
-        return answer_query(request.query, request.user_role, session_id=request.session_id)
+        return answer_query(body.query, body.user_role, session_id=body.session_id)
     except HTTPException:
         raise
     except Exception as exc:
-        log_error_trace(exc, {"stage": "query", "query": request.query})
+        log_error_trace(exc, {"stage": "query", "query": body.query})
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/query/stream")
-async def query_stream(request: QueryRequest) -> EventSourceResponse:
+@limiter.limit("20/minute")
+async def query_stream(request: Request, body: QueryRequest) -> EventSourceResponse:
     """
     Streaming version of /query.
     Returns tokens via SSE as they generate.
@@ -76,20 +82,25 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
     from query.memory import append_turn
     from evals.score_logger import evaluate_and_log
 
-    normalized = normalize_query(request.query)
+    normalized = normalize_query(body.query)
 
     # Step 1: Intent detection — same as /query
     intent = detect_intent(normalized)
 
+    # NOTE: generators below yield raw payload strings (no "data: " prefix,
+    # no trailing newlines) — EventSourceResponse applies the actual SSE
+    # "data: ...\n\n" wire framing itself. Pre-formatting it here would
+    # double-wrap the payload and the frontend's JSON.parse would silently
+    # fail on every line.
     if intent == "greeting":
         async def greeting_stream():
             answer = (
                 "Hello! I can answer questions about your "
                 "uploaded documents. What would you like to know?"
             )
-            yield f"data: {json.dumps({'token': answer})}\n\n"
-            yield "data: [DONE]\n\n"
-            yield f"data: {json.dumps({'sources': [], 'cache_hit': False, 'intent': intent})}\n\n"
+            yield json.dumps({"token": answer})
+            yield "[DONE]"
+            yield json.dumps({"sources": [], "cache_hit": False, "intent": intent})
         return EventSourceResponse(greeting_stream())
 
     if intent == "out_of_scope":
@@ -99,9 +110,9 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
                 "that have been uploaded. Could you ask something "
                 "related to those?"
             )
-            yield f"data: {json.dumps({'token': answer})}\n\n"
-            yield "data: [DONE]\n\n"
-            yield f"data: {json.dumps({'sources': [], 'cache_hit': False, 'intent': intent})}\n\n"
+            yield json.dumps({"token": answer})
+            yield "[DONE]"
+            yield json.dumps({"sources": [], "cache_hit": False, "intent": intent})
         return EventSourceResponse(out_of_scope_stream())
 
     query_embedding = get_embedding(normalized)
@@ -114,17 +125,17 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
     if cached is not None:
         async def cached_stream():
             for token in cached["answer"].split():
-                yield (
-                    f"data: {json.dumps({'token': token + ' '})}\n\n"
-                )
-            yield "data: [DONE]\n\n"
-            yield f"data: {json.dumps({'sources': cached['sources'], 'cache_hit': True, 'intent': intent})}\n\n"
+                yield json.dumps({"token": token + " "})
+            yield "[DONE]"
+            yield json.dumps(
+                {"sources": cached["sources"], "cache_hit": True, "intent": intent}
+            )
 
             # Append cached answer to memory
-            if request.session_id:
+            if body.session_id:
                 append_turn(
-                    request.session_id,
-                    request.query,
+                    body.session_id,
+                    body.query,
                     cached["answer"]
                 )
         return EventSourceResponse(cached_stream())
@@ -134,18 +145,18 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
     # Step 3: Retrieve + rerank
     results = search(
         query_embedding,
-        request.user_role,
+        body.user_role,
         query_text=normalized
     )
     results = rerank_results(normalized, results)
 
     # Step 4: Build prompt with conversation history
     history = (
-        get_history(request.session_id)
-        if request.session_id else []
+        get_history(body.session_id)
+        if body.session_id else []
     )
     system_prompt, messages = build_prompt(
-        request.query, results, conversation_history=history
+        body.query, results, conversation_history=history
     )
     # stream_llm_response takes a flat system+user pair;
     # pass the current turn's content as user_message
@@ -159,12 +170,12 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
         async for chunk in stream_llm_response(
             system_prompt, user_message
         ):
-            # Collect tokens to reconstruct full answer
-            if chunk.startswith("data: ") and "[DONE]" not in chunk:
+            # Collect tokens to reconstruct full answer. chunk is the raw
+            # payload yielded by stream_llm_response — either a JSON token
+            # object or the literal "[DONE]" sentinel, not SSE-framed yet.
+            if chunk != "[DONE]":
                 try:
-                    data = json.loads(
-                        chunk.removeprefix("data: ").strip()
-                    )
+                    data = json.loads(chunk)
                     if "token" in data:
                         collected_tokens.append(data["token"])
                 except Exception:
@@ -181,42 +192,45 @@ async def query_stream(request: QueryRequest) -> EventSourceResponse:
         )
 
         # Step 6b: Append to conversation memory
-        if request.session_id:
+        if body.session_id:
             append_turn(
-                request.session_id,
-                request.query,
+                body.session_id,
+                body.query,
                 full_answer
             )
 
         # Step 6c: Run RAGAS evals async
         evaluate_and_log(
             trace_id=None,  # no Langfuse trace_id in stream context
-            query=request.query,
+            query=body.query,
             answer=full_answer,
             retrieved_chunks=[r.payload["text"] for r in results],
         )
 
         # Final metadata event
-        yield f"data: {json.dumps({'sources': sources, 'cache_hit': False, 'intent': intent})}\n\n"
+        yield json.dumps({"sources": sources, "cache_hit": False, "intent": intent})
 
     return EventSourceResponse(response_stream())
 
 
 @router.post("/session")
-async def create_new_session() -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def create_new_session(request: Request) -> dict[str, Any]:
     """Create a new conversation session for multi-turn chat."""
     return {"session_id": create_session()}
 
 
 @router.delete("/session/{session_id}")
-async def delete_session(session_id: str) -> dict[str, Any]:
+@limiter.limit("10/minute")
+async def delete_session(request: Request, session_id: str) -> dict[str, Any]:
     """Clear a session's conversation memory."""
     clear_session(session_id)
     return {"status": "cleared"}
 
 
 @router.delete("/document/{doc_hash}")
-async def delete_document(doc_hash: str) -> dict[str, Any]:
+@limiter.limit("5/minute")
+async def delete_document(request: Request, doc_hash: str) -> dict[str, Any]:
     """Delete a document's chunks, S3 object, and registry entries."""
     record = document_registry.get_record_by_hash(doc_hash)
     if record is None:
@@ -241,7 +255,8 @@ async def delete_document(doc_hash: str) -> dict[str, Any]:
 
 
 @router.get("/document/{doc_hash}")
-async def get_document(doc_hash: str) -> dict[str, Any]:
+@limiter.limit("30/minute")
+async def get_document(request: Request, doc_hash: str) -> dict[str, Any]:
     """Return the registry record for a single document."""
     record = document_registry.get_record_by_hash(doc_hash)
     if record is None:
@@ -259,26 +274,30 @@ async def get_document(doc_hash: str) -> dict[str, Any]:
 
 
 @router.get("/documents")
-async def list_documents() -> dict[str, Any]:
+@limiter.limit("30/minute")
+async def list_documents(request: Request) -> dict[str, Any]:
     """List every document currently in the registry."""
     return {"documents": document_registry.list_all_records()}
 
 
 @router.get("/cache/stats")
-async def cache_stats() -> dict[str, Any]:
+@limiter.limit("30/minute")
+async def cache_stats(request: Request) -> dict[str, Any]:
     """Return exact/semantic cache hit and miss counters."""
     return cache_manager.get_cache_stats()
 
 
 @router.delete("/cache/flush")
-async def flush_cache() -> dict[str, Any]:
+@limiter.limit("2/minute")
+async def flush_cache(request: Request) -> dict[str, Any]:
     """Clear all cached query responses."""
     keys_deleted = cache_manager.flush_cache()
     return {"status": "cleared", "keys_deleted": keys_deleted}
 
 
 @router.get("/health")
-async def health() -> dict[str, Any]:
+@limiter.limit("60/minute")
+async def health(request: Request) -> dict[str, Any]:
     """Report connectivity to Qdrant, Redis, and S3."""
     try:
         qdrant_client.get_collections()

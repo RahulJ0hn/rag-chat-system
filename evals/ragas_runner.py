@@ -15,11 +15,17 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas import evaluate
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import answer_relevancy, context_precision, faithfulness
+from ragas.metrics import _LLMContextPrecisionWithoutReference, answer_relevancy, faithfulness
 
 logger = logging.getLogger(__name__)
 
 LOW_SCORE_THRESHOLD = 0.7
+
+# The plain `context_precision` singleton requires a human-written
+# 'reference' answer, which doesn't exist for live production queries —
+# only the reference-free variant works here. Re-aliased to the name
+# the rest of this module (and callers) expect.
+context_precision = _LLMContextPrecisionWithoutReference(name="context_precision")
 
 
 def run_ragas_eval(
@@ -27,11 +33,13 @@ def run_ragas_eval(
 ) -> dict[str, float | None]:
     """Run the RAGAS metric suite for one query/answer/context triple."""
     try:
+        # Column names match ragas' current SingleTurnSample schema —
+        # the old question/answer/contexts naming no longer validates.
         dataset = Dataset.from_dict(
             {
-                "question": [query],
-                "answer": [answer],
-                "contexts": [retrieved_chunks],
+                "user_input": [query],
+                "response": [answer],
+                "retrieved_contexts": [retrieved_chunks],
             }
         )
 
@@ -51,10 +59,12 @@ def run_ragas_eval(
             embeddings=embeddings,
         )
 
+        # evaluate() returns one score per dataset row as a list;
+        # we always evaluate exactly one query/answer pair at a time.
         scores = {
-            "faithfulness": round(result["faithfulness"], 4),
-            "answer_relevancy": round(result["answer_relevancy"], 4),
-            "context_precision": round(result["context_precision"], 4),
+            "faithfulness": round(result["faithfulness"][0], 4),
+            "answer_relevancy": round(result["answer_relevancy"][0], 4),
+            "context_precision": round(result["context_precision"][0], 4),
         }
     except Exception as exc:
         logger.warning(f"RAGAS_EVAL_FAILED | {query} | {exc}")

@@ -10,6 +10,14 @@ import cohere
 
 co = cohere.Client(api_key=os.getenv("COHERE_API_KEY"))
 
+# Below this, Cohere found no confident match for ANY candidate — a
+# degenerate near-zero score spread (e.g. terse table rows vs. a
+# threshold question like "spending more than $1000") produces a
+# meaningless reorder that can drop genuinely relevant chunks in favor
+# of noise. Trusting that reorder is worse than just keeping the
+# original retrieval order, so fall back to it instead.
+MIN_CONFIDENT_RERANK_SCORE = 0.01
+
 
 def rerank_results(query: str, results: list[Any]) -> list[Any]:
     """
@@ -29,6 +37,20 @@ def rerank_results(query: str, results: list[Any]) -> list[Any]:
             documents=documents,
             top_n=int(os.getenv("RERANKER_TOP_N", 5)),
         )
+
+        if not response.results:
+            return results[: int(os.getenv("RERANKER_TOP_N", 5))]
+
+        top_score = response.results[0].relevance_score
+        if top_score < MIN_CONFIDENT_RERANK_SCORE:
+            import structlog
+
+            logger = structlog.get_logger()
+            logger.warning(
+                f"RERANKER_DEGENERATE | top_score={top_score:.6f} | "
+                f"falling back to cosine order"
+            )
+            return results[: int(os.getenv("RERANKER_TOP_N", 5))]
 
         # Reorder original Qdrant results by Cohere's ranking
         reranked = [results[hit.index] for hit in response.results]

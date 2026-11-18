@@ -16,7 +16,7 @@ def log_scores_to_langfuse(trace_id: str, scores: dict[str, float | None]) -> No
     for metric_name, value in scores.items():
         if value is None:
             continue
-        langfuse_client.score(trace_id=trace_id, name=metric_name, value=value)
+        langfuse_client.create_score(trace_id=trace_id, name=metric_name, value=value)
 
 
 def _run_and_log(

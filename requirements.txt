@@ -16,3 +16,6 @@ structlog
 cohere
 sse-starlette
 langchain-openai
+slowapi
+aiofiles
+python-multipart

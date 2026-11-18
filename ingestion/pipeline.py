@@ -36,6 +36,12 @@ from storage import document_registry, object_store
 # Module-level client — never instantiate per call.
 qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
 
+# Qdrant's default HTTP payload limit is 32MB. A single large document
+# (hundreds of pages -> thousands of chunks, each carrying a 1536-dim
+# dense vector + sparse vector + text payload) can blow past that in
+# one upsert call, so points are sent in fixed-size batches instead.
+UPSERT_BATCH_SIZE = 100
+
 
 def ensure_collection() -> None:
     """
@@ -176,7 +182,9 @@ def ingest_document(file_bytes: bytes, filename: str) -> dict[str, Any]:
 
     upsert_start = time.monotonic()
     try:
-        qdrant_client.upsert(collection_name=os.getenv("QDRANT_COLLECTION"), points=points)
+        for batch_start in range(0, len(points), UPSERT_BATCH_SIZE):
+            batch = points[batch_start : batch_start + UPSERT_BATCH_SIZE]
+            qdrant_client.upsert(collection_name=os.getenv("QDRANT_COLLECTION"), points=batch)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Qdrant unavailable: {exc}") from exc
     upsert_time_ms = round((time.monotonic() - upsert_start) * 1000, 2)
