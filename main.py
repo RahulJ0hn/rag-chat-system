@@ -27,12 +27,19 @@ app.add_exception_handler(
     RateLimitExceeded, _rate_limit_exceeded_handler
 )
 
+# Local dev origins are always allowed; add any deployed frontend
+# origin(s) via CORS_ORIGINS in .env (comma-separated) rather than
+# hardcoding them here — e.g. CORS_ORIGINS=https://app.your-domain.com
+_default_origins = ["http://localhost:5173", "http://localhost:3000"]
+_extra_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev server
-        "http://localhost:3000",   # fallback
-    ],
+    allow_origins=_default_origins + _extra_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
