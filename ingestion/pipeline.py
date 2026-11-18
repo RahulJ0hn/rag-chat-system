@@ -34,7 +34,9 @@ from query.sparse_encoder import compute_sparse_vector
 from storage import document_registry, object_store
 
 # Module-level client — never instantiate per call.
-qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
+qdrant_client = QdrantClient(
+    url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY") or None
+)
 
 # Qdrant's default HTTP payload limit is 32MB. A single large document
 # (hundreds of pages -> thousands of chunks, each carrying a 1536-dim

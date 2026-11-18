@@ -20,7 +20,9 @@ from qdrant_client.models import (
 from query.sparse_encoder import compute_sparse_vector
 
 # Module-level client — never instantiate per call.
-qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
+qdrant_client = QdrantClient(
+    url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY") or None
+)
 
 RETRIEVAL_LIMIT = 10  # Feature: Cohere Reranker — fetch more candidates to rerank
 HYBRID_PREFETCH_LIMIT = 20  # Feature: Hybrid Search — candidates per prefetch leg
