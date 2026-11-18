@@ -1,0 +1,19 @@
+app = "rag-chat-system"
+primary_region = "nrt"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  # unstructured[pdf]'s dependency on unstructured_inference pulls in
+  # torch/transformers, which needs more headroom than 1gb to load
+  # safely alongside the rest of the app.
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 1
